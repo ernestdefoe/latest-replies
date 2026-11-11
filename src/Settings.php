@@ -48,6 +48,12 @@ final class Settings
         return $this->get('excerpt') ? max(40, min(300, (int) $this->get('excerpt_length') ?: 100)) : 0;
     }
 
+    /** The forum's default language. */
+    public function forumLocale(): string
+    {
+        return (string) ($this->settings->get('default_locale') ?: 'en');
+    }
+
     /** @return int[] */
     public function tagIds(string $key): array
     {

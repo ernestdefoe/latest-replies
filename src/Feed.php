@@ -8,7 +8,9 @@ use Flarum\Extension\ExtensionManager;
 use Flarum\Http\UrlGenerator;
 use Flarum\Post\Post;
 use Flarum\User\User;
+use Flarum\Locale\LocaleManager;
 use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
@@ -57,6 +59,7 @@ class Feed
         private readonly ExtensionManager $extensions,
         private readonly UrlGenerator $url,
         private readonly LoggerInterface $log,
+        private readonly LocaleManager $locales,
     ) {
         $this->nobody = StatelessApi::from($api);
     }
@@ -86,31 +89,73 @@ class Feed
         }
 
         $key = 'ernestdefoe-latest-replies.g.'.md5($id);
-        $entry = $this->cache->get($key);
-        $stale = is_array($entry) ? $entry['rows'] : null;
-        if (is_array($entry) && $entry['v'] === $version && time() - $entry['at'] < self::GUEST_TTL) {
-            return $entry['rows'];
+        $fresh = function () use ($key, $version): ?array {
+            $entry = $this->cache->get($key);
+
+            return is_array($entry) && $entry['v'] === $version && time() - $entry['at'] < self::GUEST_TTL ? $entry['rows'] : null;
+        };
+        if (($rows = $fresh()) !== null) {
+            return $rows;
+        }
+        // A build that just failed isn't retried on every request, and nothing older is served
+        // meanwhile: the change that made it stale may have been a post hidden for privacy.
+        if ($this->cache->get($key.'.failed') === $version) {
+            return [];
         }
 
-        // One rebuild at a time: the others get the previous answer while it runs.
+        // One rebuild at a time. While another request rebuilds, the previous answer; with none
+        // yet (a cold cache), wait briefly for theirs rather than building it again.
+        $entry = $this->cache->get($key);
         $lock = $this->cache->getStore() instanceof LockProvider ? $this->cache->getStore()->lock($key.'.lock', 15) : null;
         if ($lock && ! $lock->get()) {
-            if ($stale !== null) {
-                return $stale;
+            if (is_array($entry)) {
+                return $entry['rows'];
             }
-            $lock = null;
+            try {
+                $lock->block(3);
+            } catch (LockTimeoutException) {
+                return [];
+            }
+            if (($rows = $fresh()) !== null) {
+                $lock->release();
+
+                return $rows;
+            }
         }
 
         try {
-            $rows = $this->build(fn (string $path, array $query) => $this->nobody->asNobody($path, $query), null, $tag, $limit);
-            if ($rows !== null) {
-                $this->cache->put($key, ['v' => $version, 'at' => time(), 'rows' => $rows], 600);
+            $rows = $this->inForumLocale(fn () => $this->build(fn (string $path, array $query) => $this->nobody->asNobody($path, $query), null, $tag, $limit));
+            if ($rows === null) {
+                $this->cache->put($key.'.failed', $version, 15);
+
+                return [];
             }
+            $this->cache->put($key, ['v' => $version, 'at' => time(), 'rows' => $rows], 600);
+
+            return $rows;
         } finally {
             $lock?->release();
         }
+    }
 
-        return $rows ?? $stale ?? [];
+    /**
+     * The shared guest answer in the forum's own language, not the language of whichever guest
+     * happened to rebuild it (gates translate their placeholders).
+     *
+     * @template T
+     * @param callable(): T $build
+     * @return T
+     */
+    private function inForumLocale(callable $build): mixed
+    {
+        $previous = $this->locales->getLocale();
+        $this->locales->setLocale($this->settings->forumLocale());
+
+        try {
+            return $build();
+        } finally {
+            $this->locales->setLocale($previous);
+        }
     }
 
     /** Every cached answer is stale: a new version makes every old one unusable. */
@@ -189,6 +234,7 @@ class Feed
         // /api/posts has no tag filter, so a quiet tag may need a few pages; bounded.
         $rows = [];
         $seen = [];
+        $postIds = [];
         for ($page = 0; $page < self::PAGES; $page++) {
             $doc = $this->ask($get, '/posts', [
                 'filter' => ['type' => 'comment'],
@@ -201,7 +247,13 @@ class Feed
                 return $page === 0 ? null : $rows;
             }
 
-            $rows = array_merge($rows, $this->collect($doc, true, $length, $limit - count($rows), $include, $exclude, $ignored, $oncePerDiscussion, $seen));
+            // A post can move to the next page while we read (new posts push the list down): once only.
+            foreach ($this->collect($doc, true, $length, $limit - count($rows), $include, $exclude, $ignored, $oncePerDiscussion, $seen) as $row) {
+                if (! isset($postIds[$row['id']])) {
+                    $postIds[$row['id']] = true;
+                    $rows[] = $row;
+                }
+            }
             if (count($rows) >= $limit || count($doc['data']) < self::PAGE) {
                 break;
             }

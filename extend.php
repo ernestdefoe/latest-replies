@@ -65,6 +65,9 @@ $extenders = [
         ->listen(DiscussionEvent\Hidden::class, $forget)
         ->listen(DiscussionEvent\Restored::class, $forget)
         ->listen(DiscussionEvent\Deleted::class, $forget)
+        // After any discussion is written: Spoiler Shield marks, Byobu recipients, tags and anything
+        // else other extensions keep on the row (after the write, so a rebuild can't read the old row).
+        ->listen('eloquent.saved: Flarum\\Discussion\\Discussion', $forget)
         // Any setting: ours, and other extensions' that change what guests may read (Spoiler Shield, Velvet Rope…).
         ->listen(Saved::class, $forget)
         // Names and pictures are in the rows.
@@ -78,7 +81,11 @@ if (class_exists(\Flarum\Approval\Event\PostWasApproved::class)) {
     $extenders[] = (new Extend\Event())->listen(\Flarum\Approval\Event\PostWasApproved::class, $forget);
 }
 if (class_exists(\Flarum\Tags\Event\DiscussionWasTagged::class)) {
-    $extenders[] = (new Extend\Event())->listen(\Flarum\Tags\Event\DiscussionWasTagged::class, $forget);
+    $extenders[] = (new Extend\Event())
+        ->listen(\Flarum\Tags\Event\DiscussionWasTagged::class, $forget)
+        // A tag renamed, recoloured, restricted or deleted.
+        ->listen('eloquent.saved: Flarum\\Tags\\Tag', $forget)
+        ->listen('eloquent.deleted: Flarum\\Tags\\Tag', $forget);
 }
 // Byobu: a discussion going private or public.
 if (class_exists(\FoF\Byobu\Events\RecipientsChanged::class)) {

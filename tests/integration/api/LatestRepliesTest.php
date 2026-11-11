@@ -4,6 +4,7 @@ namespace ErnestDefoe\LatestReplies\Tests\integration\api;
 
 use Carbon\Carbon;
 use ErnestDefoe\LatestReplies\Excerpt;
+use ErnestDefoe\LatestReplies\Tests\integration\Fixtures\FailingApi;
 use ErnestDefoe\LatestReplies\Tests\integration\Fixtures\RevealToCrawlers;
 use Flarum\Discussion\Discussion;
 use Flarum\Extend;
@@ -221,6 +222,31 @@ class LatestRepliesTest extends TestCase
     {
         $this->assertContains('Staff only', $this->titles(3));
         $this->assertNotContains('Staff only', $this->titles(null));
+    }
+
+    #[Test]
+    public function one_members_answer_never_reaches_another_member(): void
+    {
+        // The moderator's list (with the staff tag) is cached for them; the member asks right after.
+        $this->assertContains('Staff only', $this->titles(3));
+        $this->assertNotContains('Staff only', $this->titles(2));
+        $this->assertContains('Staff only', $this->titles(3));
+    }
+
+    #[Test]
+    public function a_failed_guest_rebuild_serves_nothing_rather_than_an_old_answer(): void
+    {
+        $this->extend((new Extend\Middleware('api'))->add(FailingApi::class));
+        $this->assertContains('Public talk', $this->titles(null));
+        // A change, then the API fails: guests get nothing, not the list from before the change.
+        $this->patch(1, '/api/discussions/1', ['type' => 'discussions', 'id' => '1', 'attributes' => ['isHidden' => true]]);
+        FailingApi::$failing = true;
+        try {
+            $this->assertSame([], $this->rows(null));
+            $this->assertSame([], $this->rows(null));
+        } finally {
+            FailingApi::$failing = false;
+        }
     }
 
     #[Test]
