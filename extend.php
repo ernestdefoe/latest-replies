@@ -21,6 +21,7 @@ use Flarum\Discussion\Event as DiscussionEvent;
 use Flarum\Extend;
 use Flarum\Post\Event as PostEvent;
 use Flarum\Settings\Event\Saved;
+use Flarum\User\Event as UserEvent;
 
 $forget = fn () => resolve(Feed::class)->forget();
 
@@ -64,15 +65,12 @@ $extenders = [
         ->listen(DiscussionEvent\Hidden::class, $forget)
         ->listen(DiscussionEvent\Restored::class, $forget)
         ->listen(DiscussionEvent\Deleted::class, $forget)
-        ->listen(Saved::class, function (Saved $event) {
-            foreach (array_keys($event->settings) as $key) {
-                if (str_starts_with($key, 'ernestdefoe-latest-replies.')) {
-                    resolve(Feed::class)->forget();
-
-                    return;
-                }
-            }
-        }),
+        // Any setting: ours, and other extensions' that change what guests may read (Spoiler Shield, Velvet Rope…).
+        ->listen(Saved::class, $forget)
+        // Names and pictures are in the rows.
+        ->listen(UserEvent\Deleted::class, $forget)
+        ->listen(UserEvent\Renamed::class, $forget)
+        ->listen(UserEvent\AvatarChanged::class, $forget),
 ];
 
 // Approval and tag changes move posts in and out of a guest's view too.
@@ -81,6 +79,13 @@ if (class_exists(\Flarum\Approval\Event\PostWasApproved::class)) {
 }
 if (class_exists(\Flarum\Tags\Event\DiscussionWasTagged::class)) {
     $extenders[] = (new Extend\Event())->listen(\Flarum\Tags\Event\DiscussionWasTagged::class, $forget);
+}
+// Byobu: a discussion going private or public.
+if (class_exists(\FoF\Byobu\Events\RecipientsChanged::class)) {
+    $extenders[] = (new Extend\Event())
+        ->listen(\FoF\Byobu\Events\RecipientsChanged::class, $forget)
+        ->listen(\FoF\Byobu\Events\Created::class, $forget)
+        ->listen(\FoF\Byobu\Events\DiscussionMadePublic::class, $forget);
 }
 
 // The Page Builder block only offers the widget in its editor; the client fetches like every other host.

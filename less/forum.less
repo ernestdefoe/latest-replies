@@ -165,13 +165,26 @@
   white-space: nowrap;
 }
 
+// The tag's own colour only as a dot: as text it can be unreadable on light or dark backgrounds.
 @{lr} .LatestReplies-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   max-width: 50%;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
-  color: var(--tag-color, var(--muted-color));
+  color: var(--muted-color);
+}
+
+.LatestReplies-tagDot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tag-color, var(--muted-color));
 }
 
 // The stock sidebar copy is a card like the nav beside it; on phones the sidebar folds

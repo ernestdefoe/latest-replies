@@ -175,7 +175,8 @@ export default class LatestReplies extends Component<LatestRepliesAttrs> {
             {row.excerpt ? <span className="LatestReplies-excerpt">{row.excerpt}</span> : null}
             <span className="LatestReplies-meta">
               {row.tag ? (
-                <span className="LatestReplies-tag" style={row.tag.color ? { '--tag-color': row.tag.color } : undefined}>
+                <span className="LatestReplies-tag">
+                  <span className="LatestReplies-tagDot" style={row.tag.color ? { '--tag-color': row.tag.color } : undefined} aria-hidden="true" />
                   {row.tag.name}
                 </span>
               ) : null}

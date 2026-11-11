@@ -4,12 +4,15 @@ namespace ErnestDefoe\LatestReplies\Tests\integration\api;
 
 use Carbon\Carbon;
 use ErnestDefoe\LatestReplies\Excerpt;
+use ErnestDefoe\LatestReplies\Tests\integration\Fixtures\RevealToCrawlers;
 use Flarum\Discussion\Discussion;
+use Flarum\Extend;
 use Flarum\Group\Group;
 use Flarum\Post\Post;
 use Flarum\Testing\integration\RetrievesAuthorizedUsers;
 use Flarum\Testing\integration\TestCase;
 use Flarum\User\User;
+use Laminas\Diactoros\ServerRequest;
 use PHPUnit\Framework\Attributes\Test;
 
 class LatestRepliesTest extends TestCase
@@ -20,7 +23,7 @@ class LatestRepliesTest extends TestCase
     {
         parent::setUp();
 
-        $this->extension('flarum-tags', 'ernestdefoe-latest-replies');
+        $this->extension('flarum-tags', 'flarum-flags', 'flarum-approval', 'ernestdefoe-latest-replies');
 
         $at = fn (int $minutes) => Carbon::now()->subMinutes($minutes);
         $post = fn (int $id, int $discussion, int $number, int $user, int $ago, string $text, array $extra = []) => $extra + [
@@ -56,13 +59,14 @@ class LatestRepliesTest extends TestCase
             ],
             Post::class => [
                 $post(11, 1, 1, 2, 100, 'Start'),
-                $post(12, 1, 2, 3, 30, 'PUBLIC-REPLY'),
+                $post(12, 1, 2, 3, 30, 'PUBLIC-REPLY CLASSIFIED'),
                 $post(13, 1, 3, 2, 25, 'HIDDEN-REPLY', ['hidden_at' => $at(24), 'hidden_user_id' => 1]),
                 $post(21, 2, 1, 3, 100, 'Staff start'),
                 $post(22, 2, 2, 3, 20, 'STAFF-REPLY'),
                 $post(31, 3, 1, 2, 100, 'Private start', ['is_private' => 1]),
                 $post(32, 3, 2, 3, 10, 'PRIVATE-REPLY', ['is_private' => 1]),
                 $post(41, 4, 1, 2, 5, 'New discussion body'),
+                $post(42, 4, 2, 3, 4, 'AWAITING-APPROVAL', ['is_approved' => 0]),
             ],
         ]);
     }
@@ -102,6 +106,23 @@ class LatestRepliesTest extends TestCase
     }
 
     #[Test]
+    public function a_byobu_private_discussion_is_never_listed_even_to_its_participants(): void
+    {
+        $this->extension('flarum-tags', 'flarum-flags', 'flarum-approval', 'fof-byobu', 'ernestdefoe-latest-replies');
+        $this->prepareDatabase(['recipients' => [
+            ['discussion_id' => 3, 'user_id' => 2, 'created_at' => Carbon::now(), 'updated_at' => Carbon::now()],
+            ['discussion_id' => 3, 'user_id' => 3, 'created_at' => Carbon::now(), 'updated_at' => Carbon::now()],
+        ]]);
+
+        // The participant can open it through core's own API…
+        $this->assertSame(200, $this->send($this->request('GET', '/api/discussions/3', ['authenticatedAs' => 2]))->getStatusCode());
+        // …but the widget never lists it, in either mode.
+        $this->assertNotContains('Private chat', $this->titles(2, ['limit' => 20]));
+        $this->setting('ernestdefoe-latest-replies.mode', 'post');
+        $this->assertStringNotContainsString('Private chat', json_encode($this->rows(3, ['limit' => 20])));
+    }
+
+    #[Test]
     public function new_discussions_can_be_left_out(): void
     {
         $this->setting('ernestdefoe-latest-replies.first_posts', '0');
@@ -112,7 +133,8 @@ class LatestRepliesTest extends TestCase
     public function a_tag_page_lists_only_that_tag(): void
     {
         $this->assertSame(['Staff only'], $this->titles(3, ['tag' => 'staff']));
-        $this->assertSame([], $this->titles(2, ['tag' => 'staff']));
+        // A tag this viewer can't see is no tag: the forum-wide list, which says nothing about it.
+        $this->assertSame(['Brand new', 'Public talk'], $this->titles(2, ['tag' => 'staff']));
     }
 
     #[Test]
@@ -144,9 +166,11 @@ class LatestRepliesTest extends TestCase
         $this->extension('flarum-tags', 'fof-ignore-users', 'ernestdefoe-latest-replies');
         $this->prepareDatabase(['ignored_user' => [['user_id' => 2, 'ignored_user_id' => 3, 'ignored_at' => Carbon::now()]]]);
 
-        // User 3 wrote Public talk's newest reply; Brand new is user 2's own.
-        $this->assertSame(['Brand new'], $this->titles(2));
-        $this->assertSame(['Brand new', 'Public talk'], $this->titles(null));
+        // User 3 wrote Public talk's newest visible reply: the list falls back to the post before it.
+        $rows = $this->rows(2);
+        $this->assertSame(['Brand new', 'Public talk'], array_column($rows, 'discussionTitle'));
+        $this->assertSame(1, $rows[1]['number']);
+        $this->assertSame(2, $this->rows(null)[1]['number']);
     }
 
     #[Test]
@@ -170,6 +194,82 @@ class LatestRepliesTest extends TestCase
     }
 
     #[Test]
+    public function the_shared_guest_answer_is_never_a_trusted_visitors_view(): void
+    {
+        $this->extend((new Extend\Middleware('api'))->add(RevealToCrawlers::class));
+        $this->setting('ernestdefoe-latest-replies.excerpt', '1');
+
+        // A crawler (by User-Agent, also in PHP's globals, and by IP) asks first, filling the cache.
+        $previous = $_SERVER['HTTP_USER_AGENT'] ?? null;
+        $_SERVER['HTTP_USER_AGENT'] = 'Googlebot';
+        try {
+            $request = $this->request('GET', '/api/latest-replies');
+            $crawler = new ServerRequest(['REMOTE_ADDR' => '6.6.6.6', 'HTTP_USER_AGENT' => 'Googlebot'], [], $request->getUri(), 'GET', 'php://temp', ['User-Agent' => 'Googlebot']);
+            $body = (string) $this->send($crawler)->getBody();
+        } finally {
+            $previous === null ? (function () { unset($_SERVER['HTTP_USER_AGENT']); })() : $_SERVER['HTTP_USER_AGENT'] = $previous;
+        }
+
+        // The crawler's own view of the widget is the plain guest view: built as nobody.
+        $this->assertStringContainsString('REDACTED', $body);
+        $this->assertStringNotContainsString('CLASSIFIED', $body);
+        $this->assertStringNotContainsString('CLASSIFIED', json_encode($this->rows(null)));
+    }
+
+    #[Test]
+    public function a_members_answer_never_reaches_guests(): void
+    {
+        $this->assertContains('Staff only', $this->titles(3));
+        $this->assertNotContains('Staff only', $this->titles(null));
+    }
+
+    #[Test]
+    public function hiding_or_deleting_a_discussion_reaches_the_cached_guest_list(): void
+    {
+        $this->assertContains('Public talk', $this->titles(null));
+        $this->patch(1, '/api/discussions/1', ['type' => 'discussions', 'id' => '1', 'attributes' => ['isHidden' => true]]);
+        $this->assertNotContains('Public talk', $this->titles(null));
+
+        $this->assertContains('Brand new', $this->titles(null));
+        $response = $this->send($this->request('DELETE', '/api/discussions/4', ['authenticatedAs' => 1]));
+        $this->assertSame(204, $response->getStatusCode());
+        $this->assertNotContains('Brand new', $this->titles(null));
+    }
+
+    #[Test]
+    public function approving_a_reply_reaches_the_cached_guest_list(): void
+    {
+        $this->assertSame(1, $this->rows(null)[0]['number']);
+        $this->patch(1, '/api/posts/42', ['type' => 'posts', 'id' => '42', 'attributes' => ['isApproved' => true]]);
+        $this->assertSame(['Brand new', 2], [$this->rows(null)[0]['discussionTitle'], $this->rows(null)[0]['number']]);
+    }
+
+    #[Test]
+    public function a_moderator_never_sees_hidden_discussions_or_unapproved_replies_listed(): void
+    {
+        $this->patch(1, '/api/discussions/1', ['type' => 'discussions', 'id' => '1', 'attributes' => ['isHidden' => true]]);
+        $rows = $this->rows(1, ['limit' => 20]);
+        $this->assertNotContains('Public talk', array_column($rows, 'discussionTitle'));
+        // Brand new's unapproved reply (#2) is not its newest listed post.
+        $this->assertSame(1, $rows[0]['number']);
+    }
+
+    #[Test]
+    public function made_up_tags_are_the_forum_wide_list(): void
+    {
+        foreach (['STAFF', 'general,staff', 'nope', ' ', str_repeat('x', 500)] as $tag) {
+            $this->assertSame(['Brand new', 'Public talk'], $this->titles(null, ['tag' => $tag]), "?tag=$tag");
+        }
+        $this->assertSame(['Brand new', 'Public talk'], $this->titles(null, ['tag' => 'general']));
+    }
+
+    private function patch(int $as, string $path, array $data): void
+    {
+        $response = $this->send($this->request('PATCH', $path, ['authenticatedAs' => $as, 'json' => ['data' => $data]]));
+        $this->assertSame(200, $response->getStatusCode(), (string) $response->getBody());
+    }
+
+    #[Test]
     public function excerpts_keep_only_the_replys_own_words(): void
     {
         $html = '<p>Loved it. <span class="spoiler">SPOILER</span> <code>CODE</code></p>'
@@ -181,5 +281,8 @@ class LatestRepliesTest extends TestCase
         $this->assertSame('Loved it. Bold and a link 😀', Excerpt::make($html, 200));
         $this->assertSame('Loved it. Bold…', Excerpt::make($html, 16));
         $this->assertNull(Excerpt::make('<blockquote><p>only a quote</p></blockquote>', 100));
+        // Allowed elements that are hidden or marked as spoilers are dropped too.
+        $this->assertSame('Shown', Excerpt::make('<p>Shown</p><p hidden>H1</p><p aria-hidden="true">H2</p><p style="display: none">H3</p>'
+            .'<p><strong class="SpoilerText">H4</strong></p><p style="visibility:hidden">H5</p>', 100));
     }
 }

@@ -76,7 +76,7 @@ final class Excerpt
                     continue;
                 }
 
-                if (! in_array($name, self::KEEP, true)) {
+                if (! in_array($name, self::KEEP, true) || self::concealed($child)) {
                     continue;
                 }
 
@@ -86,5 +86,22 @@ final class Excerpt
         }
 
         return $out;
+    }
+
+    /**
+     * An allowed element that is itself hidden or marked as a spoiler: dropped like any other.
+     */
+    private static function concealed(DOMElement $el): bool
+    {
+        if ($el->hasAttribute('hidden') || strtolower($el->getAttribute('aria-hidden')) === 'true') {
+            return true;
+        }
+
+        $style = strtolower(str_replace(' ', '', $el->getAttribute('style')));
+        if (str_contains($style, 'display:none') || str_contains($style, 'visibility:hidden')) {
+            return true;
+        }
+
+        return str_contains(strtolower($el->getAttribute('class')), 'spoiler');
     }
 }

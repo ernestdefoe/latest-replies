@@ -5,11 +5,12 @@ namespace ErnestDefoe\LatestReplies;
 use Flarum\Api\Client;
 use Flarum\Discussion\Discussion;
 use Flarum\Extension\ExtensionManager;
-use Flarum\Http\RequestUtil;
 use Flarum\Http\UrlGenerator;
 use Flarum\Post\Post;
 use Flarum\User\User;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\Repository as Cache;
+use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Log\LoggerInterface;
 use Throwable;
@@ -17,21 +18,37 @@ use Throwable;
 /**
  * The rows of the widget, for one viewer.
  *
- * 🚨 Never a query of our own: the rows come from Flarum's API, asked as this
- * viewer through the whole API pipe, so whatever any extension hides or redacts
- * there (visibility scopes, Byobu, Approval, Spoiler Shield, Velvet Rope…) is
- * already gone. Our own rules only take more away: private discussions, hidden
- * and unapproved posts (a moderator sees those in the API), replies by members
- * the viewer ignores (fof/ignore-users), excerpts by allow-list. The answer is plain JSON shaped so that gates which scrub other
+ * 🚨 Never a query of our own for content: the rows come from Flarum's API, so
+ * whatever any extension hides or redacts there (visibility scopes, Byobu,
+ * Approval, Spoiler Shield, Velvet Rope…) is already gone. A member is asked as
+ * themselves; the guest answer every guest shares is asked as a guest who is
+ * nobody (StatelessApi: no session, cookies, headers or IP), so it is the
+ * most-redacted view, never one visitor's. Our own rules only take more away:
+ * private discussions, hidden and unapproved posts (a moderator's answer still
+ * has them), replies by members the viewer ignores (fof/ignore-users), excerpts
+ * by allow-list. The answer is plain JSON shaped so that gates which scrub other
  * extensions' JSON (discussionId + discussionTitle, a /d/{id} url) find it.
  *
- * Guests share one answer per tag and size for a minute, forgotten whenever a
- * post or discussion changes. Members are asked live: what a member may see is
- * their own, so a cache shared by group could hand one member another's rows.
+ * Caches, all forgotten when anything that can change a list changes (a new
+ * cache version): guests share one answer per tag and size for a minute, and
+ * while one request rebuilds it after a change the others are served the
+ * previous one; a member's own answer is kept 20 seconds, so a burst of
+ * Realtime pushes costs each member one rebuild.
  */
 class Feed
 {
     private const VERSION = 'ernestdefoe-latest-replies.v';
+
+    private const GUEST_TTL = 60;
+
+    private const MEMBER_TTL = 20;
+
+    /** Posts asked for per page, and how many pages, when rows come from /api/posts. */
+    private const PAGE = 50;
+
+    private const PAGES = 4;
+
+    private readonly StatelessApi $nobody;
 
     public function __construct(
         private readonly Client $api,
@@ -41,63 +58,112 @@ class Feed
         private readonly UrlGenerator $url,
         private readonly LoggerInterface $log,
     ) {
+        $this->nobody = StatelessApi::from($api);
     }
 
     /**
      * @return list<array<string, mixed>>
      */
-    public function rows(ServerRequestInterface $request, User $actor, ?string $tag, int $limit): array
+    public function rows(ServerRequestInterface $request, User $actor, ?string $tagParam, int $limit): array
     {
         $limit = Settings::clamp($limit);
-        $tag = $tag !== null && $tag !== '' && $this->tagsOn() ? $tag : null;
+        $tag = $this->resolveTag($tagParam, $actor);
+        $version = (string) $this->cache->get(self::VERSION, '0');
+        $id = ($tag['id'] ?? 0).'|'.$limit;
 
         if (! $actor->isGuest()) {
-            return $this->build($request, $tag, $limit) ?? [];
-        }
+            $key = 'ernestdefoe-latest-replies.m.'.$actor->id.'.'.md5($version.'|'.$id);
+            $rows = $this->cache->get($key);
+            if (is_array($rows)) {
+                return $rows;
+            }
+            $rows = $this->build(fn (string $path, array $query) => $this->api->withParentRequest($request)->withQueryParams($query)->get($path), $actor, $tag, $limit);
+            if ($rows !== null) {
+                $this->cache->put($key, $rows, self::MEMBER_TTL);
+            }
 
-        $key = 'ernestdefoe-latest-replies.guest.'.md5($this->cache->get(self::VERSION, '0').'|'.$tag.'|'.$limit);
-
-        $rows = $this->cache->get($key);
-        if (is_array($rows)) {
-            return $rows;
-        }
-
-        $rows = $this->build($request, $tag, $limit);
-        // An empty answer for a tag isn't kept: made-up ?tag= values would otherwise each add a cache entry.
-        if ($rows === null || ($rows === [] && $tag !== null)) {
             return $rows ?? [];
         }
 
-        $this->cache->put($key, $rows, 60);
+        $key = 'ernestdefoe-latest-replies.g.'.md5($id);
+        $entry = $this->cache->get($key);
+        $stale = is_array($entry) ? $entry['rows'] : null;
+        if (is_array($entry) && $entry['v'] === $version && time() - $entry['at'] < self::GUEST_TTL) {
+            return $entry['rows'];
+        }
 
-        return $rows;
+        // One rebuild at a time: the others get the previous answer while it runs.
+        $lock = $this->cache->getStore() instanceof LockProvider ? $this->cache->getStore()->lock($key.'.lock', 15) : null;
+        if ($lock && ! $lock->get()) {
+            if ($stale !== null) {
+                return $stale;
+            }
+            $lock = null;
+        }
+
+        try {
+            $rows = $this->build(fn (string $path, array $query) => $this->nobody->asNobody($path, $query), null, $tag, $limit);
+            if ($rows !== null) {
+                $this->cache->put($key, ['v' => $version, 'at' => time(), 'rows' => $rows], 600);
+            }
+        } finally {
+            $lock?->release();
+        }
+
+        return $rows ?? $stale ?? [];
     }
 
-    /** Every guest answer is stale: a new version makes every old key unreachable. */
+    /** Every cached answer is stale: a new version makes every old one unusable. */
     public function forget(): void
     {
         $this->cache->forever(self::VERSION, uniqid('', true));
     }
 
     /**
+     * ?tag= as exactly one existing tag this viewer can see, or no tag at all: anything else
+     * (another case, a list, a tag they can't see, nonsense) is the forum-wide list, so made-up
+     * values can't each make a cache entry or tell anyone which hidden tags exist.
+     *
+     * @return array{id: int, slug: string}|null
+     */
+    private function resolveTag(?string $param, User $actor): ?array
+    {
+        if ($param === null || $param === '' || str_contains($param, ',') || ! $this->tagsOn()) {
+            return null;
+        }
+
+        $tag = \Flarum\Tags\Tag::query()->whereVisibleTo($actor)->where('slug', $param)->first(['id', 'slug']);
+
+        return $tag && $tag->slug === $param ? ['id' => (int) $tag->id, 'slug' => (string) $tag->slug] : null;
+    }
+
+    /**
+     * @param callable(string, array<string, mixed>): ResponseInterface $get
+     * @param array{id: int, slug: string}|null $tag
      * @return list<array<string, mixed>>|null null when the API could not answer
      */
-    private function build(ServerRequestInterface $request, ?string $tag, int $limit): ?array
+    private function build(callable $get, ?User $member, ?array $tag, int $limit): ?array
     {
-        $perPost = $this->settings->perPost();
         $length = $this->settings->excerptLength();
         [$include, $exclude] = $this->tagFilter($tag);
+        $ignored = $member ? $this->ignoredBy($member) : [];
+        // One row per discussion comes from /api/discussions, unless the member ignores someone:
+        // then from posts, newest first, so a discussion whose last reply is theirs falls back
+        // to the reply before it instead of disappearing.
+        $fromPosts = $this->settings->perPost() || $ignored;
+        $oncePerDiscussion = ! $this->settings->perPost();
 
-        if ($perPost) {
-            $path = '/posts';
-            $params = [
-                'filter' => ['type' => 'comment'],
-                'sort' => '-createdAt',
-                // /api/posts has no tag filter, so ask for more when tags narrow the list.
-                'page' => ['limit' => $include || $exclude ? 50 : min(50, $limit * 2 + 5)],
-                'include' => $this->tagsOn() ? 'user,discussion,discussion.tags' : 'user,discussion',
-            ];
-        } else {
+        // Sparse fieldsets: only what a row needs, so the dozens of fields other extensions add to
+        // discussions and posts (and their queries) aren't computed. Gates that redact the API's
+        // output still run on it (Spoiler Shield looks marks up itself when its field isn't asked for).
+        $fields = [
+            'discussions' => 'title,slug,lastPostNumber,lastPostedAt,isHidden,hiddenAt,lastPost,lastPostedUser,tags',
+            'posts' => 'number,createdAt,contentType,'.($length ? 'contentHtml,' : '').'isHidden,hiddenAt,isApproved,user,discussion',
+            'users' => 'displayName,slug,avatarUrl,color',
+            'tags' => 'name,slug,color,position,parent',
+        ];
+
+        if (! $fromPosts) {
             $filter = [];
             if ($include) {
                 $filter['tag'] = implode(',', $include);
@@ -105,30 +171,54 @@ class Feed
             if ($exclude) {
                 $filter['-tag'] = implode(',', $exclude);
             }
-            $path = '/discussions';
-            $params = [
+            $doc = $this->ask($get, '/discussions', [
                 'filter' => $filter,
                 'sort' => '-lastPostedAt',
                 // Some may be dropped below (private, no replies yet): ask for a few more.
                 'page' => ['limit' => min(50, $limit * 2 + 5)],
-                // The last post itself only for its excerpt: every extension adds to a post's
-                // payload (mentions, likes…), and the discussion already says its number and time.
+                // The last post itself only for its excerpt: the discussion already says its number and time.
                 'include' => implode(',', array_filter([$length ? 'lastPost' : null, 'lastPostedUser', $this->tagsOn() ? 'tags' : null])),
-            ];
+                'fields' => $fields,
+            ]);
+
+            $seen = [];
+
+            return $doc === null ? null : $this->collect($doc, false, $length, $limit, $include, $exclude, $ignored, false, $seen);
         }
 
-        // Sparse fieldsets: only what a row needs, so the dozens of fields other extensions add to
-        // discussions and posts (and their queries) aren't computed. Gates that redact the API's
-        // output still run on it (Spoiler Shield looks marks up itself when its field isn't asked for).
-        $params['fields'] = [
-            'discussions' => 'title,slug,lastPostNumber,lastPostedAt,isHidden,hiddenAt,lastPost,lastPostedUser,tags',
-            'posts' => 'number,createdAt,contentType,contentHtml,isHidden,hiddenAt,isApproved,user,discussion',
-            'users' => 'displayName,slug,avatarUrl,color',
-            'tags' => 'name,slug,color,position,parent',
-        ];
+        // /api/posts has no tag filter, so a quiet tag may need a few pages; bounded.
+        $rows = [];
+        $seen = [];
+        for ($page = 0; $page < self::PAGES; $page++) {
+            $doc = $this->ask($get, '/posts', [
+                'filter' => ['type' => 'comment'],
+                'sort' => '-createdAt',
+                'page' => ['limit' => self::PAGE, 'offset' => $page * self::PAGE],
+                'include' => $this->tagsOn() ? 'user,discussion,discussion.tags' : 'user,discussion',
+                'fields' => $fields,
+            ]);
+            if ($doc === null) {
+                return $page === 0 ? null : $rows;
+            }
 
+            $rows = array_merge($rows, $this->collect($doc, true, $length, $limit - count($rows), $include, $exclude, $ignored, $oncePerDiscussion, $seen));
+            if (count($rows) >= $limit || count($doc['data']) < self::PAGE) {
+                break;
+            }
+        }
+
+        return $rows;
+    }
+
+    /**
+     * @param callable(string, array<string, mixed>): ResponseInterface $get
+     * @param array<string, mixed> $query
+     * @return array<string, mixed>|null
+     */
+    private function ask(callable $get, string $path, array $query): ?array
+    {
         try {
-            $response = $this->api->withParentRequest($request)->withQueryParams($params)->get($path);
+            $response = $get($path, $query);
             $doc = json_decode((string) $response->getBody(), true);
         } catch (Throwable $e) {
             $this->log->warning('[latest-replies] '.$e->getMessage());
@@ -142,6 +232,22 @@ class Feed
             return null;
         }
 
+        return $doc;
+    }
+
+    /**
+     * The rows in one API answer.
+     *
+     * @param array<string, mixed> $doc
+     * @param string[] $include
+     * @param string[] $exclude
+     * @param array<int, true> $ignored
+     * @param bool $once one row per discussion: skip discussions in $seen, and add each listed one
+     * @param array<int, true> $seen
+     * @return list<array<string, mixed>>
+     */
+    private function collect(array $doc, bool $posts, int $length, int $limit, array $include, array $exclude, array $ignored, bool $once, array &$seen): array
+    {
         $included = [];
         foreach ($doc['included'] ?? [] as $resource) {
             $included[$resource['type'].':'.$resource['id']] = $resource;
@@ -153,12 +259,15 @@ class Feed
         };
 
         $firstPosts = $this->settings->firstPosts();
-        [$privateDiscussions, $privatePosts] = $this->privateIds($doc['data'], $perPost);
-        $ignored = $this->ignoredBy($request);
+        [$privateDiscussions, $privatePosts] = $this->privateIds($doc['data'], $posts);
         $rows = [];
 
         foreach ($doc['data'] as $resource) {
-            if ($perPost) {
+            if (count($rows) >= $limit) {
+                break;
+            }
+
+            if ($posts) {
                 $post = $resource;
                 $discussion = $related($post, 'discussion');
                 $user = $related($post, 'user');
@@ -174,7 +283,8 @@ class Feed
 
             if (! $post || ! $discussion || ! $this->shows($post, $discussion)
                 || isset($privateDiscussions[(int) $discussion['id']]) || ($post['id'] !== null && isset($privatePosts[(int) $post['id']]))
-                || ($user && isset($ignored[(int) $user['id']]))) {
+                || ($user && isset($ignored[(int) $user['id']]))
+                || ($once && isset($seen[(int) $discussion['id']]))) {
                 continue;
             }
 
@@ -184,15 +294,14 @@ class Feed
             }
 
             $tags = $this->tagsOn() ? $this->tagsOf($discussion, $included) : [];
-            if ($perPost && ! $this->tagsMatch($tags, $include, $exclude)) {
+            if ($posts && ! $this->tagsMatch($tags, $include, $exclude)) {
                 continue;
             }
 
-            $rows[] = $this->row($post, $discussion, $user, $tags, $length);
-
-            if (count($rows) >= $limit) {
-                break;
+            if ($once) {
+                $seen[(int) $discussion['id']] = true;
             }
+            $rows[] = $this->row($post, $discussion, $user, $tags, $length);
         }
 
         return $rows;
@@ -206,11 +315,11 @@ class Feed
      * @param list<array<string, mixed>> $data
      * @return array{0: array<int, true>, 1: array<int, true>}
      */
-    private function privateIds(array $data, bool $perPost): array
+    private function privateIds(array $data, bool $posts): array
     {
         $discussionIds = $postIds = [];
         foreach ($data as $resource) {
-            if ($perPost) {
+            if ($posts) {
                 $postIds[] = (int) $resource['id'];
                 $discussionIds[] = (int) ($resource['relationships']['discussion']['data']['id'] ?? 0);
             } else {
@@ -219,25 +328,24 @@ class Feed
         }
 
         $discussions = $discussionIds ? Discussion::query()->whereIn('id', array_unique($discussionIds))->where('is_private', true)->pluck('id')->all() : [];
-        $posts = $postIds ? Post::query()->whereIn('id', $postIds)->where('is_private', true)->pluck('id')->all() : [];
+        $postRows = $postIds ? Post::query()->whereIn('id', $postIds)->where('is_private', true)->pluck('id')->all() : [];
 
-        return [array_fill_keys(array_map('intval', $discussions), true), array_fill_keys(array_map('intval', $posts), true)];
+        return [array_fill_keys(array_map('intval', $discussions), true), array_fill_keys(array_map('intval', $postRows), true)];
     }
 
     /**
      * Members this viewer ignores (fof/ignore-users): their replies are left out. One query,
-     * members only, and nothing at all without that extension.
+     * and nothing at all without that extension.
      *
      * @return array<int, true>
      */
-    private function ignoredBy(ServerRequestInterface $request): array
+    private function ignoredBy(User $member): array
     {
-        $actor = RequestUtil::getActor($request);
-        if ($actor->isGuest() || ! $this->extensions->isEnabled('fof-ignore-users')) {
+        if (! $this->extensions->isEnabled('fof-ignore-users')) {
             return [];
         }
 
-        $ids = $actor->getConnection()->table('ignored_user')->where('user_id', $actor->id)->pluck('ignored_user_id')->all();
+        $ids = $member->getConnection()->table('ignored_user')->where('user_id', $member->id)->pluck('ignored_user_id')->all();
 
         return array_fill_keys(array_map('intval', $ids), true);
     }
@@ -249,7 +357,7 @@ class Feed
         $d = $discussion['attributes'] ?? [];
 
         return ($p['contentType'] ?? 'comment') === 'comment'
-            // A moderator's API answer still carries hidden and unapproved posts.
+            // A moderator's API answer still carries hidden and unapproved posts and hidden discussions.
             && empty($p['isHidden']) && empty($p['hiddenAt'])
             && ($p['isApproved'] ?? true) !== false
             && empty($d['isHidden']) && empty($d['hiddenAt']);
@@ -324,7 +432,7 @@ class Feed
     }
 
     /**
-     * Per-post mode filters here: /api/posts has no tag filter.
+     * Rows from /api/posts filter here: it has no tag filter.
      *
      * @param list<array{slug: string}> $tags
      * @param string[] $include
@@ -341,16 +449,17 @@ class Feed
      * Slugs to include and exclude. A tag page shows that tag (a discussion in a
      * child tag always carries its parent too); otherwise the admin's choice.
      *
+     * @param array{id: int, slug: string}|null $tag
      * @return array{0: string[], 1: string[]}
      */
-    private function tagFilter(?string $tag): array
+    private function tagFilter(?array $tag): array
     {
         if (! $this->tagsOn()) {
             return [[], []];
         }
 
         $exclude = $this->slugs($this->settings->tagIds('exclude_tags'));
-        $include = $tag !== null ? [$tag] : $this->slugs($this->settings->tagIds('include_tags'));
+        $include = $tag !== null ? [$tag['slug']] : $this->slugs($this->settings->tagIds('include_tags'));
 
         return [$include, array_values(array_diff($exclude, $include))];
     }

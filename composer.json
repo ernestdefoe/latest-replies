@@ -62,9 +62,11 @@
         }
     },
     "require-dev": {
+        "flarum/approval": "^2.0",
         "flarum/phpstan": "^2.0",
         "flarum/tags": "^2.0",
         "flarum/testing": "^2.0",
+        "fof/byobu": "^2.0",
         "fof/ignore-users": "^2.0"
     },
     "scripts": {
