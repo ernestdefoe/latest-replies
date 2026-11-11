@@ -115,6 +115,18 @@
   color: var(--muted-color);
 }
 
+// Grids (wide rows, the wide-screen fallback) have any number of columns: every item keeps its
+// top border and moves up 1px, and the list clips the first row's, so no column count shows a stray line.
+.LatestReplies--wide .LatestReplies-list,
+.LatestReplies--fallback .LatestReplies-list {
+  overflow: hidden;
+  .LatestReplies-item,
+  .LatestReplies-item:first-child {
+    border-top: 1px solid var(--control-bg);
+    margin-top: -1px;
+  }
+}
+
 // Wide rows: top of the list and wide widget zones.
 .LatestReplies--wide {
   padding: 12px 16px;
@@ -127,9 +139,6 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(~"min(320px, 100%)", 1fr));
     column-gap: 24px;
-  }
-  .LatestReplies-item:nth-child(2) {
-    border-top: 0;
   }
   .LatestReplies-avatar.Avatar {
     --size: 32px;
@@ -191,9 +200,6 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(~"min(300px, 100%)", 1fr));
     column-gap: 24px;
-  }
-  .LatestReplies--fallback .LatestReplies-item:nth-child(2) {
-    border-top: 0;
   }
 }
 
