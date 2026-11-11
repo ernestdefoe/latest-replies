@@ -93,7 +93,8 @@ class Feed
             $params = [
                 'filter' => ['type' => 'comment'],
                 'sort' => '-createdAt',
-                'page' => ['limit' => 50],
+                // /api/posts has no tag filter, so ask for more when tags narrow the list.
+                'page' => ['limit' => $include || $exclude ? 50 : min(50, $limit * 2 + 5)],
                 'include' => $this->tagsOn() ? 'user,discussion,discussion.tags' : 'user,discussion',
             ];
         } else {
@@ -115,6 +116,16 @@ class Feed
                 'include' => implode(',', array_filter([$length ? 'lastPost' : null, 'lastPostedUser', $this->tagsOn() ? 'tags' : null])),
             ];
         }
+
+        // Sparse fieldsets: only what a row needs, so the dozens of fields other extensions add to
+        // discussions and posts (and their queries) aren't computed. Gates that redact the API's
+        // output still run on it (Spoiler Shield looks marks up itself when its field isn't asked for).
+        $params['fields'] = [
+            'discussions' => 'title,slug,lastPostNumber,lastPostedAt,isHidden,hiddenAt,lastPost,lastPostedUser,tags',
+            'posts' => 'number,createdAt,contentType,contentHtml,isHidden,hiddenAt,isApproved,user,discussion',
+            'users' => 'displayName,slug,avatarUrl,color',
+            'tags' => 'name,slug,color,position,parent',
+        ];
 
         try {
             $response = $this->api->withParentRequest($request)->withQueryParams($params)->get($path);
