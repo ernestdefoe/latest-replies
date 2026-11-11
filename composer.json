@@ -56,14 +56,16 @@
                 "flarum/tags",
                 "flarum/realtime",
                 "flarum/approval",
-                "fof/byobu"
+                "fof/byobu",
+                "fof/ignore-users"
             ]
         }
     },
     "require-dev": {
         "flarum/phpstan": "^2.0",
         "flarum/tags": "^2.0",
-        "flarum/testing": "^2.0"
+        "flarum/testing": "^2.0",
+        "fof/ignore-users": "^2.0"
     },
     "scripts": {
         "test": [

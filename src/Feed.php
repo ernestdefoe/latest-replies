@@ -3,8 +3,11 @@
 namespace ErnestDefoe\LatestReplies;
 
 use Flarum\Api\Client;
+use Flarum\Discussion\Discussion;
 use Flarum\Extension\ExtensionManager;
+use Flarum\Http\RequestUtil;
 use Flarum\Http\UrlGenerator;
+use Flarum\Post\Post;
 use Flarum\User\User;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Psr\Http\Message\ServerRequestInterface;
@@ -18,8 +21,8 @@ use Throwable;
  * viewer through the whole API pipe, so whatever any extension hides or redacts
  * there (visibility scopes, Byobu, Approval, Spoiler Shield, Velvet Rope…) is
  * already gone. Our own rules only take more away: private discussions, hidden
- * and unapproved posts (a moderator sees those in the API), excerpts by
- * allow-list. The answer is plain JSON shaped so that gates which scrub other
+ * and unapproved posts (a moderator sees those in the API), replies by members
+ * the viewer ignores (fof/ignore-users), excerpts by allow-list. The answer is plain JSON shaped so that gates which scrub other
  * extensions' JSON (discussionId + discussionTitle, a /d/{id} url) find it.
  *
  * Guests share one answer per tag and size for a minute, forgotten whenever a
@@ -139,6 +142,8 @@ class Feed
         };
 
         $firstPosts = $this->settings->firstPosts();
+        [$privateDiscussions, $privatePosts] = $this->privateIds($doc['data'], $perPost);
+        $ignored = $this->ignoredBy($request);
         $rows = [];
 
         foreach ($doc['data'] as $resource) {
@@ -156,7 +161,9 @@ class Feed
                 $user = $related($discussion, 'lastPostedUser');
             }
 
-            if (! $post || ! $discussion || ! $this->shows($post, $discussion)) {
+            if (! $post || ! $discussion || ! $this->shows($post, $discussion)
+                || isset($privateDiscussions[(int) $discussion['id']]) || ($post['id'] !== null && isset($privatePosts[(int) $post['id']]))
+                || ($user && isset($ignored[(int) $user['id']]))) {
                 continue;
             }
 
@@ -180,6 +187,50 @@ class Feed
         return $rows;
     }
 
+    /**
+     * 🚨 Private discussions are never listed, not even to their participants (Ernest's rule,
+     * fixed, not a setting). Read from the rows themselves, so it holds whatever Byobu (or
+     * anything else that makes discussions private) calls its attributes. One query.
+     *
+     * @param list<array<string, mixed>> $data
+     * @return array{0: array<int, true>, 1: array<int, true>}
+     */
+    private function privateIds(array $data, bool $perPost): array
+    {
+        $discussionIds = $postIds = [];
+        foreach ($data as $resource) {
+            if ($perPost) {
+                $postIds[] = (int) $resource['id'];
+                $discussionIds[] = (int) ($resource['relationships']['discussion']['data']['id'] ?? 0);
+            } else {
+                $discussionIds[] = (int) $resource['id'];
+            }
+        }
+
+        $discussions = $discussionIds ? Discussion::query()->whereIn('id', array_unique($discussionIds))->where('is_private', true)->pluck('id')->all() : [];
+        $posts = $postIds ? Post::query()->whereIn('id', $postIds)->where('is_private', true)->pluck('id')->all() : [];
+
+        return [array_fill_keys(array_map('intval', $discussions), true), array_fill_keys(array_map('intval', $posts), true)];
+    }
+
+    /**
+     * Members this viewer ignores (fof/ignore-users): their replies are left out. One query,
+     * members only, and nothing at all without that extension.
+     *
+     * @return array<int, true>
+     */
+    private function ignoredBy(ServerRequestInterface $request): array
+    {
+        $actor = RequestUtil::getActor($request);
+        if ($actor->isGuest() || ! $this->extensions->isEnabled('fof-ignore-users')) {
+            return [];
+        }
+
+        $ids = $actor->getConnection()->table('ignored_user')->where('user_id', $actor->id)->pluck('ignored_user_id')->all();
+
+        return array_fill_keys(array_map('intval', $ids), true);
+    }
+
     /** Our own rules, on top of everything the API already left out. */
     private function shows(array $post, array $discussion): bool
     {
@@ -190,10 +241,7 @@ class Feed
             // A moderator's API answer still carries hidden and unapproved posts.
             && empty($p['isHidden']) && empty($p['hiddenAt'])
             && ($p['isApproved'] ?? true) !== false
-            && empty($d['isHidden']) && empty($d['hiddenAt'])
-            // Byobu's private discussions are never listed, not even to their own participants.
-            && empty($d['isPrivate'])
-            && empty($d['isPrivateDiscussion']);
+            && empty($d['isHidden']) && empty($d['hiddenAt']);
     }
 
     /**

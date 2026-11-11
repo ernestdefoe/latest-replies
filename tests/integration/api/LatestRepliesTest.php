@@ -48,7 +48,7 @@ class LatestRepliesTest extends TestCase
                 $discussion(1, 'Public talk', 12, 2, 30),
                 $discussion(2, 'Staff only', 22, 2, 20),
                 $discussion(3, 'Private chat', 32, 2, 10, ['is_private' => 1]),
-                $discussion(4, 'Brand new', 41, 1, 5),
+                $discussion(4, 'Brand new', 41, 1, 5, ['last_posted_user_id' => 2]),
             ],
             'discussion_tag' => [
                 ['discussion_id' => 1, 'tag_id' => 1], ['discussion_id' => 2, 'tag_id' => 2],
@@ -136,6 +136,17 @@ class LatestRepliesTest extends TestCase
         $guest = json_encode($this->rows(null, ['limit' => 20]));
         $this->assertStringContainsString('PUBLIC-REPLY', $guest);
         $this->assertStringNotContainsString('STAFF-REPLY', $guest);
+    }
+
+    #[Test]
+    public function replies_by_members_the_viewer_ignores_are_left_out(): void
+    {
+        $this->extension('flarum-tags', 'fof-ignore-users', 'ernestdefoe-latest-replies');
+        $this->prepareDatabase(['ignored_user' => [['user_id' => 2, 'ignored_user_id' => 3, 'ignored_at' => Carbon::now()]]]);
+
+        // User 3 wrote Public talk's newest reply; Brand new is user 2's own.
+        $this->assertSame(['Brand new'], $this->titles(2));
+        $this->assertSame(['Brand new', 'Public talk'], $this->titles(null));
     }
 
     #[Test]
