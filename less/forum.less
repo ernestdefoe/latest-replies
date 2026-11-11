@@ -1,0 +1,212 @@
+// Every colour comes from Flarum's own properties, and link rules are prefixed so a theme's
+// `a` colour (Bespoke light: 0,3,1) can't recolour the rows.
+@lr: ~"html:not(#x-lr) .LatestReplies";
+
+.LatestReplies {
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-color);
+}
+
+.LatestReplies-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+@{lr} .LatestReplies-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-color);
+}
+
+@{lr} .LatestReplies-toggle {
+  min-height: 32px;
+  padding: 0 4px;
+  color: var(--muted-color);
+}
+
+.LatestReplies-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.LatestReplies-item {
+  border-top: 1px solid var(--control-bg);
+  &:first-child {
+    border-top: 0;
+  }
+}
+
+@{lr} .LatestReplies-link {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 7px 0;
+  color: var(--text-color);
+  text-decoration: none;
+
+  &:hover .LatestReplies-discussion,
+  &:focus-visible .LatestReplies-discussion {
+    text-decoration: underline;
+  }
+}
+
+.LatestReplies-avatar.Avatar {
+  --size: 26px;
+  flex-shrink: 0;
+  width: var(--size);
+  height: var(--size);
+  font-size: 11px;
+  line-height: var(--size);
+}
+
+.LatestReplies-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+@{lr} .LatestReplies-discussion {
+  font-weight: 600;
+  color: var(--text-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// Compact rows sit in narrow columns (the scrubber's is 180px): titles get two lines.
+@{lr} .LatestReplies-text > .LatestReplies-discussion {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+@{lr} .LatestReplies-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted-color);
+}
+
+// Name · time on one line, cut short in narrow columns rather than broken apart.
+@{lr} .LatestReplies-meta--line {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@{lr} .LatestReplies-empty {
+  margin: 4px 0;
+  color: var(--muted-color);
+}
+
+// Wide rows: top of the list and wide widget zones.
+.LatestReplies--wide {
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  border: 1px solid var(--control-bg);
+  border-radius: var(--border-radius);
+  background: var(--body-bg);
+
+  .LatestReplies-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(~"min(320px, 100%)", 1fr));
+    column-gap: 24px;
+  }
+  .LatestReplies-item:nth-child(2) {
+    border-top: 0;
+  }
+  .LatestReplies-avatar.Avatar {
+    --size: 32px;
+    font-size: 12px;
+  }
+}
+
+@{lr} .LatestReplies-line {
+  color: var(--muted-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@{lr} .LatestReplies-author {
+  color: var(--text-color);
+}
+
+@{lr} .LatestReplies-excerpt {
+  color: var(--text-color);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@{lr} .LatestReplies-tag {
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--tag-color, var(--muted-color));
+}
+
+// The stock sidebar copy is a card like the nav beside it; on phones the sidebar folds
+// into a menu, so the phone copy above the list takes over there.
+.LatestReplies--stock-sidebar,
+.LatestReplies--stock-discussion {
+  margin-top: 18px;
+  padding: 12px 12px 6px;
+  border: 1px solid var(--control-bg);
+  border-radius: var(--border-radius);
+}
+
+.LatestReplies--stock-phone {
+  padding: 10px 12px 4px;
+  margin-bottom: 12px;
+  border: 1px solid var(--control-bg);
+  border-radius: var(--border-radius);
+}
+
+@media (min-width: 768px) {
+  .LatestReplies--stock-phone:not(.LatestReplies--fallback) {
+    display: none;
+  }
+  // No visible sidebar on a wide screen: two columns above the list.
+  .LatestReplies--fallback .LatestReplies-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(~"min(300px, 100%)", 1fr));
+    column-gap: 24px;
+  }
+  .LatestReplies--fallback .LatestReplies-item:nth-child(2) {
+    border-top: 0;
+  }
+}
+
+@media (max-width: 767px) {
+  .LatestReplies--stock-sidebar,
+  .LatestReplies--stock-discussion {
+    display: none;
+  }
+  @{lr} .LatestReplies-link {
+    min-height: 44px;
+    padding: 9px 0;
+  }
+  .LatestReplies-avatar.Avatar {
+    --size: 30px;
+  }
+}

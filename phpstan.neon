@@ -1,0 +1,17 @@
+includes:
+    - vendor/flarum/phpstan/extension.neon
+
+parameters:
+    # One process: flarum/phpstan's bootstrap installs a test forum the first
+    # time it runs, and parallel workers each start that install at once on a
+    # fresh checkout (CI), failing with Install\StepFailed.
+    parallel:
+        maximumNumberOfProcesses: 1
+    level: 6
+    paths:
+        - extend.php
+        - src
+    # Implements Page Builder's interface, which is only there when Page Builder is
+    # installed (extend.php registers the block only then).
+    excludePaths:
+        - src/Widget/LatestRepliesBlock.php
