@@ -18,6 +18,6 @@
 
 ## Testing
 
-- `composer test:setup && composer test` (SQLite, and MySQL with `DB_DRIVER=mysql DB_PREFIX=dev_`; check `vendor/flarum/testing/src/integration/tmp/config.php` says mysql), `composer analyse:phpstan`.
+- `composer test:setup && composer test` (SQLite: `touch` the DB_DATABASE file first or setup fatals and keeps the old driver; and MySQL with `DB_DRIVER=mysql DB_PREFIX=dev_`; check `vendor/flarum/testing/src/integration/tmp/config.php` says mysql), `composer analyse:phpstan`.
 - `cd js && npm ci && npm run build && npm run format-check`.
 - Local forum `~/Herd/lrdev` (prefix `lr_`); seed, probe (rows per viewer), measure (queries) and puppeteer shots in `~/github/scopes/latest-replies`.
