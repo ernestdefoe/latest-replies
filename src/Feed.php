@@ -60,8 +60,9 @@ class Feed
         }
 
         $rows = $this->build($request, $tag, $limit);
-        if ($rows === null) {
-            return [];
+        // An empty answer for a tag isn't kept: made-up ?tag= values would otherwise each add a cache entry.
+        if ($rows === null || ($rows === [] && $tag !== null)) {
+            return $rows ?? [];
         }
 
         $this->cache->put($key, $rows, 60);
