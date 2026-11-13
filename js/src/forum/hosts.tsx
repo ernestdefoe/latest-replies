@@ -92,10 +92,14 @@ function registerPageBuilder(): void {
     },
   };
 
-  // Page Builder drains this queue whenever it looks a block up, so the block is there
-  // whichever extension initialises first (Page Builder 3.10+). An earlier type wins.
+  // Page Builder 3.10+ drains this queue whenever it looks a block up, so the block is there
+  // whichever extension initialises first. An earlier type wins.
   const w = window as any;
   (w.PageBuilderBlockQueue = w.PageBuilderBlockQueue || []).push({ type: 'latest-replies', component: block });
+
+  // Older Page Builders never read the queue: register directly when it is already here
+  // (we run in app.mount, after every initializer). On 3.10+ the queued copy is then skipped.
+  (app as any).pageBuilder?.registerBlock?.('latest-replies', block);
 }
 
 /** The tag page being viewed, if any (flarum/tags). */
