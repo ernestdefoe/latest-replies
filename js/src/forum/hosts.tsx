@@ -84,16 +84,18 @@ function registerBespoke(): void {
 }
 
 function registerPageBuilder(): void {
-  const pb = (app as any).pageBuilder;
-  if (!pb?.registerBlock) return;
-
   // Matches LatestRepliesBlock::type().
-  pb.registerBlock('latest-replies', {
+  const block = {
     view: (vnode: any) => {
       const s = vnode.attrs?.settings || {};
       return <LatestReplies host="page-builder" title={s.title || undefined} limit={s.count} wide={!!s.wide} />;
     },
-  });
+  };
+
+  // Page Builder drains this queue whenever it looks a block up, so the block is there
+  // whichever extension initialises first (Page Builder 3.10+). An earlier type wins.
+  const w = window as any;
+  (w.PageBuilderBlockQueue = w.PageBuilderBlockQueue || []).push({ type: 'latest-replies', component: block });
 }
 
 /** The tag page being viewed, if any (flarum/tags). */
