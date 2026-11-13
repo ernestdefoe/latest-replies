@@ -201,7 +201,7 @@ export default class LatestReplies extends Component<LatestRepliesAttrs> {
     if (row.user?.avatarUrl) return <img className="Avatar LatestReplies-avatar" src={row.user.avatarUrl} alt="" loading="lazy" />;
 
     return (
-      <span className="Avatar LatestReplies-avatar" style={{ '--avatar-bg': row.user?.color || stringToColor(name) }} aria-hidden="true">
+      <span className="Avatar LatestReplies-avatar" style={{ '--avatar-bg': row.user?.color || '#' + stringToColor(name) }} aria-hidden="true">
         {name.charAt(0).toUpperCase()}
       </span>
     );
