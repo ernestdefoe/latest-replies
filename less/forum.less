@@ -52,6 +52,21 @@
   padding: 7px 0;
   color: var(--text-color);
   text-decoration: none;
+  // In the stock sidebar the rows are `.sideNav li > a`, which themes give a fixed height
+  // (Warren: 40px, so a two-line title ran into the next row) and nav-pill looks.
+  height: auto;
+  min-height: 0;
+  line-height: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  border-radius: 0;
+  background: none;
+
+  &:hover,
+  &:focus {
+    background: none;
+    color: var(--text-color);
+  }
 
   &:hover .LatestReplies-discussion,
   &:focus-visible .LatestReplies-discussion {

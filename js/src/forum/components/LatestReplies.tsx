@@ -147,7 +147,7 @@ export default class LatestReplies extends Component<LatestRepliesAttrs> {
   private compactRow(row: Row) {
     return (
       <li key={`${row.discussionId}-${row.number}`} className="LatestReplies-item">
-        <Link className="LatestReplies-link" href={this.href(row)}>
+        <Link className="LatestReplies-link" href={this.href(row)} title={row.discussionTitle}>
           {this.avatar(row)}
           <span className="LatestReplies-text">
             <span className="LatestReplies-discussion">{row.discussionTitle}</span>
@@ -165,7 +165,7 @@ export default class LatestReplies extends Component<LatestRepliesAttrs> {
 
     return (
       <li key={`${row.discussionId}-${row.number}`} className="LatestReplies-item">
-        <Link className="LatestReplies-link" href={this.href(row)}>
+        <Link className="LatestReplies-link" href={this.href(row)} title={row.discussionTitle}>
           {this.avatar(row)}
           <span className="LatestReplies-text">
             <span className="LatestReplies-line">
